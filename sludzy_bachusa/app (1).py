@@ -116,38 +116,46 @@ def decode_class_index(idx: int):
 
 def _compute_shap(explainer, X_row_df, class_idx):
     """
-    Zwraca (expected_value, shap_vals_for_display)
-    Obsługuje listę per-klasa i pojedyncze macierze zwracane przez różne wersje SHAP.
+    Zwraca (expected_value, shap_vec) dla JEDNEJ próbki i wskazanej klasy.
+    Obsługuje:
+      - listę per-klasa: [ (n_samples,n_features) x n_classes ]
+      - macierz 2D: (n_samples,n_features)
+      - macierz 3D: (n_samples,n_features,n_classes)
     """
     sv = explainer.shap_values(X_row_df)
     ev = explainer.expected_value
 
-    # expected value
-    if isinstance(ev, (list, np.ndarray)) and class_idx is not None:
-        try:
-            expected = float(ev[class_idx])
-        except Exception:
-            expected = float(ev[0]) if isinstance(ev, (list, np.ndarray)) else float(ev)
+    # --- expected_value (bazowa wartość) ---
+    if isinstance(ev, (list, np.ndarray)):
+        ev_arr = np.array(ev)
+        ev_flat = ev_arr.ravel()
+        if class_idx is not None and ev_flat.size > 1:
+            expected = float(ev_flat[class_idx])
+        else:
+            expected = float(ev_flat[0])
     else:
-        expected = float(ev) if np.isscalar(ev) else float(np.array(ev).ravel()[0])
+        expected = float(np.array(ev).ravel()[0])
 
-    # shap values
+    # --- shap_values -> wektor (n_features,) dla danej klasy ---
     if isinstance(sv, list):
-        # lista (n_classes) x (n_samples, n_features)
-        if class_idx is None:
-            sv_arr = np.array(sv[0])[0]
-        else:
-            sv_arr = np.array(sv[class_idx])[0]
+        # lista długości n_classes, każdy element: (n_samples,n_features)
+        sv_arr = np.array(sv[class_idx], dtype=float)
+        shap_vec = sv_arr[0] if sv_arr.ndim == 2 else sv_arr.ravel()
     else:
-        sv_np = np.array(sv)
-        if sv_np.ndim == 2:
-            sv_arr = sv_np[0]
+        sv_np = np.array(sv, dtype=float)
+        if sv_np.ndim == 3:
+            # (n_samples, n_features, n_classes)
+            shap_vec = sv_np[0, :, class_idx]
+        elif sv_np.ndim == 2:
+            # (n_samples, n_features)
+            shap_vec = sv_np[0, :]
         elif sv_np.ndim == 1:
-            sv_arr = sv_np
+            # (n_features,)
+            shap_vec = sv_np
         else:
-            sv_arr = sv_np.reshape(-1)
+            raise ValueError(f"Nieoczekiwany kształt shap_values: {sv_np.shape}")
 
-    return expected, sv_arr
+    return expected, shap_vec
 
 # =========================
 # 3) UI I LOGIKA
@@ -283,15 +291,25 @@ def main_page():
                 result_label.text = f'🍷 Ocena wina: {y_display} 😡'
                 result_label.classes(replace='text-red-600 text-4xl font-bold')
 
-            # 6) SHAP (liczymy dla indeksu klasy)
+            # 6) SHAP (liczymy dla indeksu klasy) + dopasowanie długości
             if explainer is not None:
                 try:
-                    feature_names = list(data_df.columns)
                     expected_value, shap_vals = _compute_shap(explainer, data_df, class_idx)
+
+                    # Bezpieczne dopasowanie długości do cech
+                    features_vec = data_df.values[0]
+                    feature_names = list(data_df.columns)
+                    if shap_vals.shape[0] != features_vec.shape[0]:
+                        m = min(shap_vals.shape[0], features_vec.shape[0])
+                        print(f"[SHAP] Mismatch: shap={shap_vals.shape[0]} vs features={features_vec.shape[0]} -> używam {m}")
+                        shap_vals = shap_vals[:m]
+                        features_vec = features_vec[:m]
+                        feature_names = feature_names[:m]
+
                     force_html = shap.force_plot(
                         expected_value,
                         shap_vals,
-                        data_df.values[0],
+                        features_vec,
                         feature_names=feature_names,
                         matplotlib=False,
                         show=False
@@ -393,6 +411,4 @@ def main_page():
 # =========================
 # 4) RUN
 # =========================
-# reload=True jest wygodne lokalnie; na produkcji rozważ False
 ui.run(title="Wine Quality Predictor", dark=True, reload=True)
-
